@@ -29,10 +29,11 @@ Example commands:
 - Single-line countdown with a simple ASCII progress bar.
 - Optional repeat mode: `Enter` restarts, `q` exits.
 - Optional best-effort desktop notifications with `notify-send`. (<code>sudo apt install libnotify-bin</code> for Debian based systems.)
-- Optional bundled alert sound played with `paplay`, falling back to `aplay`.
+- Optional embedded alert sound played with `paplay`, falling back to `aplay`.
 
 ## Notes
 
 - v1 is implemented and verified for Linux.
 - `--repeat` requires an interactive stdin TTY.
+- The alert sound is compiled into the binary, so installs do not need a separate WAV file.
 - Sound and desktop notifications are optional. Missing tools do not stop the timer; the app prints a warning and exits normally.

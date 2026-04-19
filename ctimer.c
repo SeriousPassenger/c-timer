@@ -14,13 +14,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "assets/alert_wav.h"
+
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
 #define BAR_WIDTH 24
 #define NS_PER_SECOND 1000000000LL
-#define SOUND_RELATIVE_PATH "assets/alert.wav"
 
 struct timer_options {
     long long total_seconds;
@@ -360,38 +361,6 @@ static int run_command(const char *resolved_path, char *const argv[]) {
     return 0;
 }
 
-static int resolve_sound_asset_path(char *asset_path, size_t asset_path_size) {
-    char executable_path[PATH_MAX];
-    ssize_t executable_length;
-    char *slash;
-
-    executable_length = readlink("/proc/self/exe",
-                                 executable_path,
-                                 sizeof(executable_path) - 1);
-    if (executable_length > 0) {
-        executable_path[executable_length] = '\0';
-        slash = strrchr(executable_path, '/');
-        if (slash != NULL) {
-            *slash = '\0';
-            if (snprintf(asset_path,
-                         asset_path_size,
-                         "%s/%s",
-                         executable_path,
-                         SOUND_RELATIVE_PATH) < (int) asset_path_size &&
-                access(asset_path, R_OK) == 0) {
-                return 0;
-            }
-        }
-    }
-
-    if (snprintf(asset_path, asset_path_size, "%s", SOUND_RELATIVE_PATH) < (int) asset_path_size &&
-        access(asset_path, R_OK) == 0) {
-        return 0;
-    }
-
-    return -1;
-}
-
 static int send_desktop_notification(char *warning, size_t warning_size) {
     char command_path[PATH_MAX];
     char *const argv[] = {"notify-send", "ctimer", "Timer complete.", NULL};
@@ -413,30 +382,74 @@ static int send_desktop_notification(char *warning, size_t warning_size) {
     return 0;
 }
 
-static int play_alert_sound(char *warning, size_t warning_size) {
-    char asset_path[PATH_MAX];
-    char command_path[PATH_MAX];
-    char *const paplay_argv[] = {"paplay", asset_path, NULL};
-    char *const aplay_argv[] = {"aplay", "-q", asset_path, NULL};
-    bool paplay_found = false;
+static int write_embedded_sound_file(char *temp_path, size_t temp_path_size) {
+    char temp_template[] = "/tmp/ctimer-alert-XXXXXX";
+    size_t total_written = 0;
+    int temp_fd = mkstemp(temp_template);
 
-    if (resolve_sound_asset_path(asset_path, sizeof(asset_path)) != 0) {
+    if (temp_fd < 0) {
+        return -1;
+    }
+
+    while (total_written < assets_alert_wav_len) {
+        ssize_t bytes_written = write(temp_fd,
+                                      assets_alert_wav + total_written,
+                                      assets_alert_wav_len - total_written);
+
+        if (bytes_written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            close(temp_fd);
+            unlink(temp_template);
+            return -1;
+        }
+
+        total_written += (size_t) bytes_written;
+    }
+
+    if (close(temp_fd) != 0) {
+        unlink(temp_template);
+        return -1;
+    }
+
+    if (snprintf(temp_path, temp_path_size, "%s", temp_template) >= (int) temp_path_size) {
+        unlink(temp_template);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int play_alert_sound(char *warning, size_t warning_size) {
+    char temp_path[PATH_MAX];
+    char command_path[PATH_MAX];
+    char *const paplay_argv[] = {"paplay", temp_path, NULL};
+    char *const aplay_argv[] = {"aplay", "-q", temp_path, NULL};
+    bool paplay_found = false;
+    int result = -1;
+
+    if (write_embedded_sound_file(temp_path, sizeof(temp_path)) != 0) {
         snprintf(warning,
                  warning_size,
-                 "alert sound asset not found; skipped sound playback.");
+                 "could not materialize embedded alert sound; skipped sound playback.");
         return -1;
     }
 
     if (find_command_in_path("paplay", command_path, sizeof(command_path))) {
         paplay_found = true;
         if (run_command(command_path, paplay_argv) == 0) {
-            return 0;
+            result = 0;
+            goto cleanup;
         }
     }
 
     if (find_command_in_path("aplay", command_path, sizeof(command_path))) {
         if (run_command(command_path, aplay_argv) == 0) {
-            return 0;
+            result = 0;
+            goto cleanup;
         }
 
         snprintf(warning,
@@ -444,7 +457,7 @@ static int play_alert_sound(char *warning, size_t warning_size) {
                  paplay_found
                      ? "paplay failed and aplay also failed; skipped sound playback."
                      : "aplay failed; skipped sound playback.");
-        return -1;
+        goto cleanup;
     }
 
     snprintf(warning,
@@ -452,7 +465,10 @@ static int play_alert_sound(char *warning, size_t warning_size) {
              paplay_found
                  ? "paplay failed and aplay is not available; skipped sound playback."
                  : "sound requested but neither paplay nor aplay is available.");
-    return -1;
+
+cleanup:
+    unlink(temp_path);
+    return result;
 }
 
 static void emit_completion_alerts(const struct timer_options *options) {
